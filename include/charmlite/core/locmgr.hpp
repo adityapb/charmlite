@@ -85,26 +85,6 @@ namespace cmk {
         {
             return this->mapper_.pe_for(idx);
         }
-
-        int num_span_tree_children(int node)
-        {
-            return this->mapper_.num_span_tree_children(node);
-        }
-
-        void span_tree_children(int node, int* children)
-        {
-            this->mapper_.span_tree_children(node, children);
-        }
-
-        int span_tree_parent(int node)
-        {
-            return this->mapper_.span_tree_parent(node);
-        }
-
-        int get_location(const chare_index_t& idx)
-        {
-            return this->pe_for(idx);
-        }
     };
 
     template <typename Mapper>

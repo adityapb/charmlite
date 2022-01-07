@@ -148,8 +148,8 @@ namespace cmk {
         using self_type = collection_bridge_<T, Mapper>;
         using element_type = chare_base_*;
 
-        // TODO LOCMGR maybe rename this message type?
         using index_message = data_message<std::pair<int, chare_index_t>>;
+        using location_message = data_message<int>;
 
     public:
         static entry_id_t receive_status(void)
@@ -160,7 +160,7 @@ namespace cmk {
 
         static entry_id_t receive_location_update(void)
         {
-            using receiver_type = member_fn_t<self_type, index_message>;
+            using receiver_type = member_fn_t<self_type, location_message>;
             return cmk::entry<receiver_type, &self_type::receive_location_update>();
         }
 
@@ -304,11 +304,10 @@ namespace cmk {
             this->produce(-1);
         }
 
-        void receive_location_update(cmk::message_ptr<index_message>&& msg)
+        void receive_location_update(cmk::message_ptr<location_message>&& msg)
         {
-            auto& val = msg->value();
-            auto& pe = val.first;
-            auto& idx = val.second;
+            auto& pe = msg->value();
+            auto& idx = msg->dst_.endpoint().chare;
             this->locmgr_.update_location(idx, pe);
         }
 

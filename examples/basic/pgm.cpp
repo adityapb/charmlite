@@ -30,10 +30,10 @@ struct foo : public cmk::chare<foo, int>
     {
         CmiPrintf("ch%d@pe%d> %d+%d=%d\n", this->index(), CmiMyPe(), this->val,
             msg->val, this->val + msg->val);
-        auto cb =
-            cmk::callback<cmk::message>::construct<cmk::exit>(cmk::all::pes);
-        this->element_proxy().contribute<cmk::message, cmk::nop>(
-            std::move(msg), cb);
+        //auto cb =
+        //    cmk::callback<cmk::message>::construct<cmk::exit>(cmk::all::pes);
+        //this->element_proxy().contribute<cmk::message, cmk::nop>(
+        //    std::move(msg), cb);
     }
 };
 
@@ -48,11 +48,9 @@ int main(int argc, char** argv)
         auto n = 8 * CmiNumPes();
         for (auto i = 0; i < n; i++)
         {
-            arr[i].insert(cmk::make_message<test_message>(i));
+            arr[i].insert(cmk::make_message<test_message>(i), 1);
+            arr[i].send<test_message, &foo::bar>(cmk::make_message<test_message>(n));
         }
-        // then send 'em a buncha' messages
-        arr.broadcast<test_message, &foo::bar>(
-            cmk::make_message<test_message>(n));
         // necessary to enable collective communication
         arr.done_inserting();
     }

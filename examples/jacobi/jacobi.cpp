@@ -15,7 +15,7 @@
 #define BOTTOM 3
 
 #define THRESHOLD 0.0004
-#define MAX_ITER 1000
+#define MAX_ITER 1
 
 class index2d
 {
