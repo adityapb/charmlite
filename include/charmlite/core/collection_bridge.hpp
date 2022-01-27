@@ -64,11 +64,12 @@ namespace cmk {
 
     // implements mapper-specific behaviors for
     // chare-collections -- i.e., listeners and spanning tree construction
-    template <typename T, template <class> class Mapper, typename Enable = void>
+    template <typename T, template <class> class Mapper, 
+             bool PerElementTree = false, typename Enable = void>
     class collection_bridge_;
 
-    template <typename T, template <class> class Mapper>
-    class collection_bridge_<T, Mapper,
+    template <typename T, template <class> class Mapper, bool PerElementTree>
+    class collection_bridge_<T, Mapper, PerElementTree,
         typename std::enable_if<(std::is_same<nodegroup_mapper<index_for_t<T>>,
                                      Mapper<index_for_t<T>>>::value ||
             std::is_same<group_mapper<index_for_t<T>>,
@@ -92,7 +93,7 @@ namespace cmk {
         {
             auto* elt = static_cast<chare_base_*>(obj);
             auto& assoc = elt->association_;
-            if (created)
+            if (PerElementTree && created)
             {
                 auto pe = this->locmgr_.lookup(elt->index_);
                 auto n_children = this->locmgr_.num_span_tree_children(pe);
@@ -148,10 +149,10 @@ namespace cmk {
     // tree builder... the code there is better commented for the time being:
     // https://github.com/jszaday/hypercomm/blob/main/include/hypercomm/tree_builder/tree_builder.hpp
     // TODO ( copy the comments from there)
-    template <typename T, template <class> class Mapper, typename Enable>
+    template <typename T, template <class> class Mapper, bool PerElementTree, typename Enable>
     class collection_bridge_ : public collection_base_
     {
-        using self_type = collection_bridge_<T, Mapper>;
+        using self_type = collection_bridge_<T, Mapper, PerElementTree, Enable>;
         using element_type = chare_base_*;
 
         using index_message = data_message<std::pair<int, chare_index_t>>;
@@ -199,7 +200,7 @@ namespace cmk {
 
         void on_chare_arrival(T* obj, bool created)
         {
-            if (created)
+            if (PerElementTree && created)
             {
                 this->associate(static_cast<element_type>(obj));
             }
