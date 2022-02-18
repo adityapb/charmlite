@@ -9,10 +9,10 @@
 #include <iostream>
 
 namespace cmk {
-    template <typename T, template <class> class Mapper>
-    class collection : public collection_bridge_<T, Mapper>
+    template <typename T, template <class> class Mapper, bool PerElementTree = true>
+    class collection : public collection_bridge_<T, Mapper, PerElementTree>
     {
-        using parent_type = collection_bridge_<T, Mapper>;
+        using parent_type = collection_bridge_<T, Mapper, PerElementTree>;
         using location_message = data_message<int>;
 
     public:
@@ -294,6 +294,7 @@ namespace cmk {
                 return;
             }
             auto& reducer = search->second;
+            CmiAssert(redn == reducer.redn);
             reducer.received.emplace_back(std::move(msg));
             // when we've received all expected messages
             if (reducer.ready())
@@ -434,19 +435,512 @@ namespace cmk {
         }
     };
 
+    template <typename T, template <class> class Mapper>
+    class collection<T, Mapper, false> : public collection_bridge_<T, Mapper, false>
+    {
+        using parent_type = collection_bridge_<T, Mapper, false>;
+        using location_message = data_message<int>;
+
+        using reducer_map_t = std::unordered_map<collective_id_t, reducer_collection_>;
+
+    public:
+        using index_type = typename parent_type::index_type;
+
+    private:
+        std::unordered_map<chare_index_t, message_buffer_t> buffers_;
+        reducer_map_t reducers_;
+        message_buffer_t collective_buffer_;
+        message_buffer_t old_bcasts_;
+        message_ptr<message> empty_redn_msg_;
+        int last_bcast_, oldest_bcast_;
+        int net_births_;
+        int spring_cleaning_ccd_;
+
+    public:
+        static_assert(
+            std::is_base_of<chare_base_, T>::value, "expected a chare!");
+
+        collection(const collection_index_t& id,
+            const collection_options<index_type>& opts, const message* msg)
+          : parent_type(id),
+            last_bcast_(-1),
+            oldest_bcast_(-1),
+            net_births_(0)
+        {
+            // need valid message and options or neither
+            CmiEnforceMsg(
+                ((bool) opts == (bool) msg), "cannot seed collection");
+            // all collections start in an inserting state
+            this->set_insertion_status(true, {});
+            if (msg)
+            {
+                using view_type = index_view<index_type>;
+                typename view_type::range_type range(
+                    opts.start(), opts.step(), opts.end());
+
+                // deliver a copy of the message to all "seeds"
+                while (range.has_next())
+                {
+                    auto next = range.advance();
+                    auto view = view_type::encode(next);
+                    // NOTE ( I'm pretty sure this is no worse than what Charm )
+                    //      ( does vis-a-vis CKARRAYMAP_POPULATE_INITIAL       )
+                    // TODO ( that said, it should be elim'd for node/groups   )
+                    if (this->locmgr_.home_pe(view) == CmiMyPe())
+                    {
+                        // simulate an insertion event
+                        this->produce();
+                        // message should be packed
+                        auto clone = msg->clone();
+                        clone->dst_.endpoint().chare = view;
+                        this->deliver_now(std::move(clone));
+                    }
+                }
+                // the default insertion phase concludes...
+                this->set_insertion_status(false, this->ready_callback_());
+            }
+
+            empty_redn_msg_ = message_ptr<>(new message);
+            empty_redn_msg_->has_combiner() = true;
+            // FIXME using -1 total contributions to denote an
+            // empty message, change this
+            empty_redn_msg_->total_contributions_ = -1;
+
+            setup_spring_cleaning_();
+        }
+
+        ~collection()
+        {
+            CcdCancelCallOnCondition(CcdPERIODIC_1minute, spring_cleaning_ccd_);
+        }
+
+        virtual void* lookup(const chare_index_t& idx) override
+        {
+            auto find = this->chares_.find(idx);
+            if (find == std::end(this->chares_))
+            {
+                return nullptr;
+            }
+            else
+            {
+                return (find->second).get();
+            }
+        }
+
+        virtual void flush_buffers(const chare_index_t& idx) override
+        {
+            auto find = this->buffers_.find(idx);
+            if (find == std::end(this->buffers_))
+            {
+                return;
+            }
+            else
+            {
+                auto& buffer = find->second;
+                while (!buffer.empty())
+                {
+                    auto& msg = buffer.front();
+                    if (this->try_deliver(msg))
+                    {
+                        // if successful, pop from the queue
+                        buffer.pop_front();
+                    }
+                    else
+                    {
+                        // if delivery failed, stop attempting
+                        // to deliver messages
+                        break;
+                    }
+                }
+            }
+        }
+
+        bool try_deliver(message_ptr<>& msg)
+        {
+            auto& ep = msg->dst_.endpoint();
+            auto* rec = msg->has_combiner() ? nullptr : record_for(ep.entry);
+            // NOTE ( the lifetime of this variable is tied to the message! )
+            auto idx = ep.chare;
+            auto home_pe = this->locmgr_.home_pe(idx);
+            auto my_pe = CmiMyPe();
+            if (rec && rec->is_constructor_)
+            {
+                if (msg->createhere() || home_pe == my_pe)
+                {
+                    auto* ch = static_cast<T*>((record_for<T>()).allocate());
+                    // set properties of the newly created chare
+                    property_setter_<T>()(ch, this->id_, idx);
+                    // place the chare within our element list
+                    [[maybe_unused]] auto ins = this->chares_.emplace(idx, ch);
+                    CmiAssertMsg(ins.second, "insertion did not occur!");
+                    CmiAssertMsg(!msg->is_broadcast(), "not implemented!");
+                    // call constructor on chare
+                    rec->invoke(ch, std::move(msg));
+                    ch->last_bcast_ = last_bcast_;
+                    // notify all chare listeners
+                    this->on_chare_arrival(ch, true);
+                    if (home_pe != my_pe)
+                        this->send_location_update_(idx, home_pe, my_pe);
+                    // flush any messages we have for it
+                    flush_buffers(idx);
+                    net_births_++;
+                }
+                else
+                {
+                    send_helper_(home_pe, std::move(msg));
+                }
+            }
+            else
+            {
+                auto find = this->chares_.find(idx);
+                // if the element isn't found locally
+                if (find == std::end(this->chares_))
+                {
+                    auto loc = this->locmgr_.lookup(idx);
+                    // this pe has no idea where idx is,
+                    // since it is the home pe, buffer here
+                    if (home_pe == my_pe && loc == home_pe)
+                        return false;
+                    // this pe has the location of idx from either the locmap
+                    // or the routing cache,
+                    // forward the message to that location
+                    else if (loc != home_pe)
+                    {
+                        if (msg->sender_pe_ >= 0 && msg->sender_pe_ != my_pe)
+                            msg->is_forwarded() = true;
+                        send_helper_(loc, std::move(msg));
+                    }
+                    // this pe has no idea of the location
+                    // and it is not the home pe, forward message to
+                    // home pe
+                    // XXX ( update bcast? prolly not. )
+                    else
+                    {
+                        if (msg->sender_pe_ >= 0 && msg->sender_pe_ != my_pe)
+                            msg->is_forwarded() = true;
+                        send_helper_(home_pe, std::move(msg));
+                    }
+                }
+                else
+                {
+                    // idx was found on non home pe and sender was not
+                    // the home pe and msg was forwarded at least once
+                    // send a routing update message to sender pe to
+                    // update the routing cache
+                    if (home_pe != my_pe && msg->sender_pe_ != home_pe &&
+                        msg->is_forwarded())
+                        this->send_location_update_(
+                            idx, msg->sender_pe_, my_pe);
+                    // otherwise, invoke the EP on the chare
+                    handle_(rec, (find->second).get(), std::move(msg));
+                }
+            }
+
+            return true;
+        }
+
+        inline void deliver_now(message_ptr<>&& msg)
+        {
+            auto& ep = msg->dst_.endpoint();
+            auto my_pe = CmiMyPe();
+            if (ep.chare == cmk::helper_::chare_bcast_root_)
+            {
+                // increment the broadcast count and go!
+                if (my_pe == 0)
+                    ep.collective = next_collective_(this->last_bcast_);
+                // send msg clones to child pes
+                for(auto child = 2 * my_pe + 1; child <= 2 * my_pe + 2; child++)
+                {
+                    if (child >= CmiNumPes())
+                        break;
+                    auto clone = msg->clone();
+                    send_helper_(child, std::move(clone));
+                }
+
+                if (ep.collective == this->last_bcast_ + 1)
+                {
+                    deliver_local_bcast(std::move(msg));
+                    this->last_bcast_++;
+                }
+                else
+                    collective_buffer_.emplace_back(std::move(msg));
+            }
+            else if (msg->has_combiner())
+            {
+                // handle reduction on local elements
+                handle_reduction_message_(std::move(msg));
+            }
+            else if (!try_deliver(msg))
+            {
+                // buffer messages when delivery attempt fails
+                this->buffer_(std::move(msg));
+            }
+        }
+
+        inline void deliver_later(message_ptr<>&& msg)
+        {
+            auto& idx = msg->dst_.endpoint().chare;
+            auto pe = (idx == cmk::helper_::chare_bcast_root_) ?
+                0 : this->locmgr_.lookup(idx);
+            send_helper_(pe, std::move(msg));
+        }
+
+        virtual void on_insertion_complete(void) override {}
+
+        void deliver_local_bcast(message_ptr<>&& msg)
+        {
+            auto& ep = msg->dst_.endpoint();
+            for(auto it = this->chares_.begin(); it != this->chares_.end(); it++)
+            {
+                auto* obj = static_cast<chare_base_*>(it->second.get());
+                auto clone = msg->clone();
+                clone->dst_.endpoint().chare = obj->index_;
+                handle_broadcast_message_(
+                        record_for(ep.entry), obj, std::move(clone));
+            }
+
+            old_bcasts_.push_back(std::move(msg));
+        }
+
+        void flush_collective_buffer(void)
+        {
+            while (!this->collective_buffer_.empty())
+            {
+                auto msg = std::move(this->collective_buffer_.front());
+                this->collective_buffer_.pop_front();
+                this->deliver_local_bcast(std::move(msg));
+            }
+        }
+
+        virtual void deliver(message_ptr<>&& msg, bool immediate) override
+        {
+            if (immediate)
+            {
+                // collection-bound messages are routed to us, yay!
+                if (msg->for_collection())
+                {
+                    auto& entry = msg->dst_.endpoint().entry;
+                    auto* rec = record_for(entry);
+                    rec->invoke(this, std::move(msg));
+                }
+                else
+                {
+                    this->deliver_now(std::move(msg));
+                }
+            }
+            else
+            {
+                this->deliver_later(std::move(msg));
+            }
+        }
+
+        virtual void contribute(message_ptr<>&& msg) override
+        {
+            msg->net_births_ = net_births_;
+            auto& ep = msg->dst_.endpoint();
+            auto& idx = ep.chare;
+            auto* obj = static_cast<chare_base_*>(this->lookup(idx));
+            CmiAssert(msg->has_combiner());
+            // stamp the message with a sequence number
+            ep.collective = next_collective_(obj->last_redn_);
+            this->handle_reduction_message_(std::move(msg));
+        }
+
+    private:
+        using reducer_iterator_t =
+            typename reducer_map_t::iterator;
+
+        void setup_spring_cleaning_()
+        {
+            spring_cleaning_ccd_ = CcdCallOnCondition(
+                    CcdPERIODIC_1minute, static_spring_cleaning_, (void*)this);
+        }
+
+        static void static_spring_cleaning_(void* collection_obj, double walltime)
+        {
+            ((collection*) collection_obj)->spring_cleaning_();
+        }
+
+        void spring_cleaning_()
+        {
+            // remove old bcasts from the queue
+            int ndelete = old_bcasts_.size() -
+                (last_bcast_ - oldest_bcast_);
+            if (ndelete > 0)
+                for (auto i = 0; i < ndelete; i++)
+                    old_bcasts_.pop_front();
+            oldest_bcast_ = last_bcast_;
+            setup_spring_cleaning_();
+        }
+
+        void deliver_migrated_bcasts_(chare_base_* obj)
+        {
+            if (obj->last_bcast_ < this->last_bcast_)
+            {
+                auto ndeliver = this->last_bcast_ - obj->last_bcast_;
+                for (auto i = old_bcasts_.size() - 1; i >= ndeliver; i--)
+                {
+                    old_bcasts_.emplace_back(old_bcasts_.front());
+                    old_bcasts_.pop_front();
+                }
+
+                for (auto i = ndeliver - 1; i >= 0; i--)
+                {
+                    auto& msg = old_bcasts_.front();
+                    old_bcasts_.pop_front();
+                    auto& ep = msg->dst_.endpoint();
+                    auto* rec = record_for(ep.entry);
+                    old_bcasts_.emplace_back(msg);
+                    rec->invoke(obj, std::move(msg));
+                }
+
+                obj->last_bcast_ = this->last_bcast_;
+            }
+        }
+
+        // CHARM-LIKE
+        void handle_reduction_message_(message_ptr<>&& msg)
+        {
+            auto& ep = msg->dst_.endpoint();
+            auto& redn = ep.collective;
+            auto& reducer = this->get_reducer_(redn)->second;
+
+            reducer.received.emplace_back(std::move(msg));
+
+            if (reducer.ready(this->chares_.size()))
+            {
+                // combine and send result to parent
+                auto comb = combiner_for(ep.entry);
+                auto& recvd = reducer.received;
+                auto& lhs = (recvd.size() > 0) ? recvd.front() : empty_redn_msg_->clone();
+
+                for (auto it = std::begin(recvd) + 1; it != std::end(recvd); it++)
+                {
+                    auto& rhs = *it;
+                    if (rhs->total_contributions_ < 0)
+                        continue;
+                    auto cont = *(rhs->continuation());
+                    // combine them by the given function
+                    auto comb_contributions =
+                        lhs->total_contributions_ + rhs->total_contributions_;
+                    auto comb_net_births = lhs->net_births_ + rhs->net_births_;
+                    lhs = comb(std::move(lhs), std::move(rhs));
+                    lhs->total_contributions_ = comb_contributions;
+                    lhs->net_births_ = comb_net_births;
+                    // reset the message's continuation
+                    // (in case it was overriden)
+                    lhs->has_continuation() = true;
+                    new (lhs->continuation()) destination(cont);
+                }
+
+                if (CmiMyPe() == 0 &&
+                        lhs->total_contributions_ < lhs->net_births_)
+                {
+                    // buffer lhs if contributions aren't done
+                    recvd.clear();
+                    recvd.emplace_back(std::move(lhs));
+                }
+                else if (CmiMyPe() == 0)
+                {
+                    // done reduction, make continuation the endpoint
+                    new (&(lhs->dst_)) destination(*(lhs->continuation()));
+                    lhs->has_combiner() = lhs->has_continuation() = false;
+                    send_helper_(0, std::move(lhs));
+                    reducers_.erase(redn);
+                }
+                else
+                {
+                    // if this pe has sent its local contributions to the parent
+                    // already, send the late contributions directly to the root
+                    // send lhs upstream
+                    send_helper_(reducer.done_contributions ? 0 :
+                            cmk::binary_tree::parent(CmiMyPe()),
+                            std::move(lhs));
+                    reducer.done_contributions = true;
+                    recvd.clear();
+                }
+            }
+        }
+
+        void handle_broadcast_message_(
+            const entry_record_* rec, chare_base_* obj, message_ptr<>&& msg)
+        {
+            // this is the current bcast
+            auto& bcast = msg->dst_.endpoint().collective;
+            auto* base = static_cast<chare_base_*>(obj);
+
+            auto next = next_collective_(base->last_bcast_);
+            if (bcast == next)
+            {
+                base->last_bcast_ = next;
+                rec->invoke(base, std::move(msg));
+                this->flush_buffers(base->index_);
+            }
+            else
+            {
+                this->buffer_(std::move(msg));
+            }
+        }
+
+        reducer_iterator_t get_reducer_(collective_id_t redn)
+        {
+            auto ins = reducers_.emplace(redn, reducer_collection_());
+            return ins.first;
+        }
+
+        void handle_(const entry_record_* rec, T* obj, message_ptr<>&& msg)
+        {
+            // if a message has a combiner...
+            if (msg->has_combiner())
+            {
+                // then it's a reduction message
+                this->handle_reduction_message_(std::move(msg));
+            }
+            else if (msg->is_broadcast())
+            {
+                this->handle_broadcast_message_(rec, obj, std::move(msg));
+            }
+            else
+            {
+                rec->invoke(obj, std::move(msg));
+            }
+        }
+
+        inline void buffer_(message_ptr<>&& msg)
+        {
+            auto& idx = msg->dst_.endpoint().chare;
+            this->buffers_[idx].emplace_back(std::move(msg));
+        }
+
+        static collective_id_t next_collective_(collective_id_t bcast)
+        {
+            constexpr auto max_bcast =
+                std::numeric_limits<collective_id_t>::max();
+            if (bcast == max_bcast)
+            {
+                return 1;
+            }
+            else
+            {
+                return bcast + 1;
+            }
+        }
+    };
+
+
     template <typename T>
     struct collection_helper_;
 
-    template <typename T, template <class> class Mapper>
-    struct collection_helper_<collection<T, Mapper>>
+    template <typename T, template <class> class Mapper, bool PerElementTree>
+    struct collection_helper_<collection<T, Mapper, PerElementTree>>
     {
         static collection_kind_t kind_;
     };
 
-    template <typename T, template <class> class Mapper>
+    template <typename T, template <class> class Mapper, bool PerElementTree = true>
     inline collection_kind_t collection_kind(void)
     {
-        return collection_helper_<collection<T, Mapper>>::kind_;
+        return collection_helper_<collection<T, Mapper, PerElementTree>>::kind_;
     }
 }    // namespace cmk
 

@@ -76,9 +76,9 @@ namespace cmk {
     }
 
     // Collection proxy member functions
-    template <typename T>
+    template <typename T, bool PerElementTree>
     template <typename Message, template <class> class Mapper>
-    collection_proxy<T> collection_proxy<T>::construct(
+    collection_proxy<T, PerElementTree> collection_proxy<T, PerElementTree>::construct(
         message_ptr<Message>&& a_msg, const options_type& opts)
     {
         collection_index_t id;
@@ -86,12 +86,13 @@ namespace cmk {
         new (&a_msg->dst_) destination(id, cmk::helper_::chare_bcast_root_,
             constructor<T, message_ptr<Message>&&>());
         call_constructor_<Mapper>(id, &opts, std::move(a_msg));
-        return collection_proxy<T>(id);
+        return collection_proxy<T, PerElementTree>(id);
     }
 
-    template <typename T>
+    template <typename T, bool PerElementTree>
     template <template <class> class Mapper>
-    collection_proxy<T> collection_proxy<T>::construct(const options_type& opts)
+    collection_proxy<T, PerElementTree> collection_proxy<T, PerElementTree>::construct(
+            const options_type& opts)
     {
         collection_index_t id;
         base_type::next_index_(id);
@@ -99,37 +100,37 @@ namespace cmk {
         new (&a_msg->dst_) destination(
             id, cmk::helper_::chare_bcast_root_, constructor<T, void>());
         call_constructor_<Mapper>(id, &opts, std::move(a_msg));
-        return collection_proxy<T>(id);
+        return collection_proxy<T, PerElementTree>(id);
     }
 
-    template <typename T>
+    template <typename T, bool PerElementTree>
     template <template <class> class Mapper>
-    collection_proxy<T> collection_proxy<T>::construct(void)
+    collection_proxy<T, PerElementTree> collection_proxy<T, PerElementTree>::construct(void)
     {
         collection_index_t id;
         base_type::next_index_(id);
         call_constructor_<Mapper>(id, nullptr, message_ptr<>());
-        return collection_proxy<T>(id);
+        return collection_proxy<T, PerElementTree>(id);
     }
 
-    template <typename T>
+    template <typename T, bool PerElementTree>
     template <template <class> class Mapper>
-    void collection_proxy<T>::done_inserting(void)
+    void collection_proxy<T, PerElementTree>::done_inserting(void)
     {
         auto msg = make_message<data_message<bool>>(false);
         new (&msg->dst_) destination(this->id_, cmk::helper_::chare_bcast_root_,
-            collection<T, Mapper>::receive_status());
+            collection<T, Mapper, PerElementTree>::receive_status());
         msg->for_collection() = true;
         auto size = msg->total_size_;
         CmiSyncBroadcastAllAndFree(size, (char*) msg.release());
     }
 
-    template <typename T>
+    template <typename T, bool PerElementTree>
     template <template <class> class Mapper>
-    void collection_proxy<T>::call_constructor_(const collection_index_t& id,
+    void collection_proxy<T, PerElementTree>::call_constructor_(const collection_index_t& id,
         const options_type* opts, message_ptr<>&& a_msg)
     {
-        auto kind = collection_kind<T, Mapper>();
+        auto kind = collection_kind<T, Mapper, PerElementTree>();
         auto offset = sizeof(message);
         auto a_sz = a_msg ? a_msg->total_size_ : 0;
         message_ptr<> msg(new (offset + a_sz + sizeof(options_type)) message);

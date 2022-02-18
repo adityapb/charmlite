@@ -65,7 +65,7 @@ namespace cmk {
     // implements mapper-specific behaviors for
     // chare-collections -- i.e., listeners and spanning tree construction
     template <typename T, template <class> class Mapper, 
-             bool PerElementTree = false, typename Enable = void>
+             bool PerElementTree = true, typename Enable = void>
     class collection_bridge_;
 
     template <typename T, template <class> class Mapper, bool PerElementTree>
@@ -254,7 +254,7 @@ namespace cmk {
         {
             auto msg = cmk::make_message<location_message>(loc);
             new (&msg->dst_) destination(this->id_, idx,
-                collection<T, Mapper>::receive_location_update());
+                collection<T, Mapper, PerElementTree>::receive_location_update());
             msg->for_collection() = true;
             send_helper_(dst_pe, std::move(msg));
         }

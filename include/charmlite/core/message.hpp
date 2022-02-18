@@ -50,6 +50,8 @@ namespace cmk {
             std::bitset<8> flags_;
             std::size_t total_size_;
             int sender_pe_;
+            int total_contributions_;
+            int net_births_;
             destination dst_;
         };
     }    // namespace
@@ -71,6 +73,8 @@ namespace cmk {
         std::bitset<8> flags_;
         std::size_t total_size_;
         int sender_pe_;
+        int total_contributions_;
+        int net_births_;
         destination dst_;
         aligned_reserve_t reserve_;
 
@@ -89,6 +93,8 @@ namespace cmk {
         message(void)
           : kind_(0)
           , total_size_(sizeof(message))
+          , total_contributions_(0)
+          , net_births_(0)
           , sender_pe_(-1)
         {
             CmiSetHandler(this, CpvAccess(converse_handler_));
@@ -97,6 +103,8 @@ namespace cmk {
         message(message_kind_t kind, std::size_t total_size)
           : kind_(kind)
           , total_size_(total_size)
+          , total_contributions_(0)
+          , net_births_(0)
           , sender_pe_(-1)
         {
             // FIXME ( DRY failure )

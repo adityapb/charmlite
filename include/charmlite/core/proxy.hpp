@@ -162,7 +162,7 @@ namespace cmk {
         }
     };
 
-    template <typename T>
+    template <typename T, bool PerElementTree = true>
     class collection_proxy : public collection_proxy_base_<T>
     {
         using base_type = collection_proxy_base_<T>;
@@ -178,15 +178,15 @@ namespace cmk {
 
         template <typename Message,
             template <class> class Mapper = default_mapper>
-        static collection_proxy<T> construct(
+        static collection_proxy<T, PerElementTree> construct(
             message_ptr<Message>&& a_msg, const options_type& opts);
 
         // TODO ( disable using this with reserved mappers (i.e., node/group) )
         template <template <class> class Mapper = default_mapper>
-        static collection_proxy<T> construct(const options_type& opts);
+        static collection_proxy<T, PerElementTree> construct(const options_type& opts);
 
         template <template <class> class Mapper = default_mapper>
-        static collection_proxy<T> construct(void);
+        static collection_proxy<T, PerElementTree> construct(void);
 
         // TODO ( encode this information within the proxy -- this is NOT user-friendly )
         template <template <class> class Mapper = default_mapper>

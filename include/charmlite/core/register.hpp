@@ -37,11 +37,11 @@ namespace cmk {
     template <typename T>
     chare_kind_t chare_kind_helper_<T>::kind_ = register_chare_<T>();
 
-    template <typename T, template <class> class Mapper>
+    template <typename T, template <class> class Mapper, bool PerElementTree>
     static collection_base_* construct_collection_(const collection_index_t& id,
         const collection_options_base_& opts, const message* msg)
     {
-        using collection_type = collection<T, Mapper>;
+        using collection_type = collection<T, Mapper, PerElementTree>;
         using index_type = typename collection_type::index_type;
         static_assert(sizeof(collection_options<index_type>) ==
                 sizeof(collection_options_base_),
@@ -50,18 +50,18 @@ namespace cmk {
             id, static_cast<const collection_options<index_type>&>(opts), msg);
     }
 
-    template <typename T, template <class> class Mapper>
+    template <typename T, template <class> class Mapper, bool PerElementTree>
     static collection_kind_t register_collection_(void)
     {
         auto id = CMK_ACCESS_SINGLETON(collection_kinds_).size() + 1;
         CMK_ACCESS_SINGLETON(collection_kinds_)
-            .emplace_back(&construct_collection_<T, Mapper>);
+            .emplace_back(&construct_collection_<T, Mapper, PerElementTree>);
         return id;
     }
 
-    template <typename T, template <class> class Mapper>
-    collection_kind_t collection_helper_<collection<T, Mapper>>::kind_ =
-        register_collection_<T, Mapper>();
+    template <typename T, template <class> class Mapper, bool PerElementTree>
+    collection_kind_t collection_helper_<collection<T, Mapper, PerElementTree>>::kind_ =
+        register_collection_<T, Mapper, PerElementTree>();
 
     template <typename T>
     static void message_deleter_impl_(void* msg)

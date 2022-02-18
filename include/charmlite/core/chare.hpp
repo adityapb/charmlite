@@ -56,7 +56,7 @@ namespace cmk {
     template <typename T, typename Index>
     class chare;
 
-    template <typename T, template <class> class Mapper>
+    template <typename T, template <class> class Mapper, bool PerElementTree>
     class collection;
 
     struct association_
@@ -79,6 +79,27 @@ namespace cmk {
         {
             this->valid_parent = true;
             this->parent.emplace_back(index);
+        }
+    };
+
+    struct reducer_collection_
+    {
+        int num_children;
+        bool done_contributions;
+        std::vector<message_ptr<message>> received;
+
+        reducer_collection_()
+          : done_contributions(false)
+        {
+            auto my_pe = CmiMyPe();
+            num_children = my_pe > 0 ? std::max((CmiNumPes() - 3) / my_pe, 2) : 
+                std::max(CmiNumPes() - 1, 2);
+        }
+
+        bool ready(int local_elements)
+        {
+            // message from all local elements and all children
+            return received.size() == (local_elements + num_children);
         }
     };
 
@@ -124,10 +145,12 @@ namespace cmk {
         template <typename T, typename Index>
         friend class chare;
 
-        template <typename T, template <class> class Mapper>
+        template <typename T, template <class> class Mapper, 
+                 bool PerElementTree>
         friend class collection;
 
-        template <typename T, template <class> class Mapper, typename Enable>
+        template <typename T, template <class> class Mapper, 
+                 bool PerElementTree, typename Enable>
         friend class collection_bridge_;
 
         template <typename T>
